@@ -97,19 +97,19 @@ static void buildReport() {
 	/*
 	 * The pins are mapped as follows:
 	 *     Pin      --- --- PB5 PB4 PB3 PB2 PB1 PB0
-	 *     Function         B10 B09 B08 B07 ---   R
+	 *     Function             B04 B03 B02 B01   R
 	 *
 	 *     Pin      --- --- PC5 PC4 PC3 PC2 PC1 PC0
-	 *     Function         B06 B05 B04 B03 B02 B01
+	 *     Function         B10 B09 B08 B07 B06 B05
 	 *
 	 *     Pin      PD7 PD6 PD5 --- PD3 --- PD1 PD0
 	 *     Function   L   U   D
 	 */
 
 	// Buttons
-	tmpReportBuffer[B_0] = ~PINC & 0b00111111;
-	tmpReportBuffer[B_0] |= (~PINB & 0b00001100) << 4;
-	tmpReportBuffer[B_1] = (~PINB & 0b00110000) >> 4;
+	tmpReportBuffer[B_0] = (~PINC & 0b00001111) << 4;
+	tmpReportBuffer[B_0] |= (~PINB & 0b00011110) >> 1;
+	tmpReportBuffer[B_1] = (~PINC & 0b00110000) >> 4;
 
 	// X axis
 	if (~PINB & _BV(0)) {
