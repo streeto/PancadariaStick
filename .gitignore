@@ -1,3 +1,6 @@
 Release
 .settings
 .cproject
+*.bak
+*.kicad_pcb-bak
+*.rpt
