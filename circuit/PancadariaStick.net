@@ -1,7 +1,7 @@
 (export (version D)
   (design
     (source /Users/andre/devel/PancadariaStick/circuit/PancadariaStick.sch)
-    (date "Quarta Feira, 09 '09e' Novembro '09e' 2016 13:36:34")
+    (date "Quarta Feira, 09 '09e' Novembro '09e' 2016 15:53:51")
     (tool "Eeschema 4.0.3-stable")
     (sheet (number 1) (name /) (tstamps /)
       (title_block
