@@ -10,7 +10,9 @@
 #include <avr/io.h>
 #include <avr/wdt.h>
 #include <avr/interrupt.h>
+#include <avr/eeprom.h>
 #include <util/delay.h>
+#include <stdbool.h>
 
 #include "usbdrv.h"
 
@@ -48,21 +50,265 @@ PROGMEM const char usbHidReportDescriptor[USB_CFG_HID_REPORT_DESCRIPTOR_LENGTH] 
 		0xc0                           // END_COLLECTION
 		};
 
-/*
- * The data described by this descriptor consists of 4 bytes:
+/* Type Defines: */
+/** Type define for the joystick HID report structure, for creating and sending HID reports to the host PC.
+ *  This mirrors the layout described to the host in the HID report descriptor, in Descriptors.c.
+ *
  *     B08 B07 B06 B05 B04 B03 B02 B01 .... Two bytes with buttons plus padding.
  *       .   .   .   .   .   . B10 B09
  *      X7  X6  X5  X4  X3  X2  X1  X0 .... 8 bit signed relative coordinate x.
  *      Y7  Y6  Y5  Y4  Y3  Y2  Y1  Y0 .... 8 bit signed relative coordinate y.
- */
-#define REPORT_LEN 4
-#define B_0 0
-#define B_1 1
-#define X_AX 2
-#define Y_AX 3
-static uchar reportBuffer[REPORT_LEN];
-static uchar tmpReportBuffer[REPORT_LEN];
+ *
+ **/
+typedef struct
+{
+	uint8_t ButtonL; /**< Bit mask of the currently pressed joystick buttons */
+	uint8_t ButtonH; /**< Bit mask of the currently pressed joystick buttons */
+	uint8_t  X; /**< Current absolute joystick X position, as a signed 8-bit integer */
+	uint8_t  Y; /**< Current absolute joystick Y position, as a signed 8-bit integer */
+} USB_JoystickReport_Data_t;
 
+/* Button mapping structures: */
+typedef enum {
+	MAP_PORTB = 0,
+	MAP_PORTC,
+	MAP_PORTD
+} MapPort_t;
+
+typedef struct {
+	MapPort_t port;
+	uint8_t mask;
+} InputMap_t;
+
+#define NUM_BUTTONS 10
+#define NUM_INPUT 14
+
+/* Buttons are mapped in the first 10 entries. Axes are stored at the end. */
+typedef enum {
+	MAP_AXIS_UP = 10,
+	MAP_AXIS_DOWN,
+	MAP_AXIS_LEFT,
+	MAP_AXIS_RIGHT
+} MapAxes_t;
+
+/* The input map is held in an array, the 10 buttons first,
+ * then the 4 diretions.
+ *
+ * The pins are mapped as follows:
+ *     Pin      --- --- PB5 PB4 PB3 PB2 PB1 PB0
+ *     Function             B04 B03 B02 B01   R
+ *
+ *     Pin      --- --- PC5 PC4 PC3 PC2 PC1 PC0
+ *     Function         B10 B09 B08 B07 B06 B05
+ *
+ *     Pin      PD7 PD6 PD5 --- PD3 --- PD1 PD0
+ *     Function   L   U   D
+ */
+const InputMap_t inputMap[NUM_INPUT] = { { MAP_PORTB, _BV(1) }, { MAP_PORTB, _BV(2) },
+		{ MAP_PORTB, _BV(3) }, { MAP_PORTB, _BV(4) }, { MAP_PORTC, _BV(0) },
+		{ MAP_PORTC, _BV(1) }, { MAP_PORTC, _BV(2) }, { MAP_PORTC, _BV(3) },
+		{ MAP_PORTC, _BV(4) }, { MAP_PORTC, _BV(5) }, { MAP_PORTD, _BV(6) }, { MAP_PORTD, _BV(5) },
+		{ MAP_PORTD, _BV(7) }, { MAP_PORTB, _BV(0) } };
+
+uint8_t buttonOrder[NUM_BUTTONS];
+uint8_t eeButtonOrder[NUM_BUTTONS] EEMEM = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+uint8_t newButtonOrder[NUM_BUTTONS];
+
+static USB_JoystickReport_Data_t jsRep;
+static USB_JoystickReport_Data_t tmpJsRep;
+
+
+/* ------------------------------------------------------------------------- */
+
+static inline uint8_t EEPROM_read(const void *eep_addr) {
+	/* Wait for completion of previous write */
+	while (EECR & (1 << EEWE));
+	/* Set up address register */
+	EEAR = (uint16_t) eep_addr;
+	/* Start eeprom read by writing EERE */
+	EECR |= (1 << EERE);
+	/* Return data from data register */
+	return EEDR;
+}
+
+/* ------------------------------------------------------------------------- */
+
+static void EEPROM_read_block(uint8_t sram_dest[], uint8_t eep_orig[], uint8_t count) {
+	uint8_t i;
+	for (i = 0; i < count; ++i) {
+		sram_dest[i] = EEPROM_read(&eep_orig[i]);
+	};
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void EEPROM_write(uint8_t *eep_addr, uint8_t data) {
+	/* Wait for completion of previous write */
+	while(EECR & (1<<EEWE));
+	/* Set up address and data registers */
+	EEAR = (uint16_t) eep_addr;
+	EEDR = data;
+	/* Write logical one to EEMWE */
+	EECR |= (1<<EEMWE);
+	/* Start eeprom write by setting EEWE */
+	EECR |= (1<<EEWE);
+}
+
+/* ------------------------------------------------------------------------- */
+
+static void EEPROM_write_block(uint8_t sram_orig[], uint8_t eep_dest[], uint8_t count) {
+	uint8_t i;
+	for (i = 0; i < count; ++i) {
+		EEPROM_write(&eep_dest[i], sram_orig[i]);
+	};
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void LED_on(void)
+{
+	PORTB &= ~(1 << PB5);
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void LED_off(void)
+{
+	PORTB |= (1 << PB5);
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void LED_toggle(void)
+{
+	if (~PORTB & (1 << PB5)) {
+		LED_off();
+	} else {
+		LED_on();
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+
+static bool InputPressed(uint8_t input) {
+	InputMap_t map;
+	if (input < NUM_BUTTONS) {
+		input = buttonOrder[input];
+	}
+	map = inputMap[input];
+	switch (map.port) {
+	case MAP_PORTB:
+		return ~PINB & map.mask;
+	case MAP_PORTC:
+		return ~PINC & map.mask;
+	case MAP_PORTD:
+		return ~PIND & map.mask;
+	}
+	return false;
+
+}
+
+/* ------------------------------------------------------------------------- */
+
+static bool IsMapped(uint8_t button, uint8_t orderMap[])
+{
+	uint8_t i;
+
+	for (i = 0; i < NUM_BUTTONS; ++i) {
+		if (orderMap[i] == button) {
+			return true;
+		}
+	}
+	return false;
+}
+
+static void MapInput(void)
+{
+	uint8_t input, button, count;
+
+	/* Default button mapping. */
+	for (input = 0; input < NUM_BUTTONS; ++input) {
+		buttonOrder[input] = input;
+	}
+	if (!InputPressed(8) || !InputPressed(9)) {
+		/* No remapping, load previous map. */
+		EEPROM_read_block(buttonOrder, eeButtonOrder, NUM_BUTTONS);
+		return;
+	}
+
+	/* Will remap buttons. Initialize blank new map. */
+	for (input = 0; input < NUM_BUTTONS; ++input) {
+		newButtonOrder[input] = 0xFF;
+	}
+	/* Blink slowly to inform the user we are remapping. */
+	for (count = 0; count < 20; ++count) {
+		LED_toggle();
+		_delay_ms(100);
+	}
+	input = 0;
+	while (input < NUM_BUTTONS) {
+		button = 0;
+		count = 0;
+		/*
+		 * Cycle through inputs and see if it keeps pressed for
+		 * one second. Can't map the same input to another button.
+		 */
+		while (count < 20) {
+			++count;
+			_delay_ms(50);
+			if (InputPressed(button) && !IsMapped(button, newButtonOrder)) {
+				LED_on();
+			} else {
+				LED_toggle();
+				count = 0;
+				++button;
+				if (button >= NUM_BUTTONS) {
+					button = 0;
+				}
+			}
+		}
+		/* Found the new input for this button. */
+		LED_off();
+		_delay_ms(1000);
+		newButtonOrder[input] = button;
+		++input;
+	}
+	/* Done remapping. Use the new map and save to eeprom. */
+	LED_off();
+	for (input = 0; input < NUM_BUTTONS; ++input) {
+		buttonOrder[input] = newButtonOrder[input];
+	}
+	EEPROM_write_block(buttonOrder, eeButtonOrder, NUM_BUTTONS);
+}
+
+/* ------------------------------------------------------------------------- */
+/** Configure joystick and button pins. */
+static void InputInit(void)
+{
+	InputMap_t map;
+	uint8_t i;
+
+	DDRB |= (1 << PB5); // Output: LED attached to PB5
+
+	/* Inputs with pullup. */
+	for(i = 0; i < NUM_INPUT; ++i) {
+		map = inputMap[i];
+		switch (map.port) {
+		case MAP_PORTB:
+			DDRB &= ~map.mask;
+			PORTB |= map.mask;
+			break;
+		case MAP_PORTC:
+			DDRC &= ~map.mask;
+			PORTC |= map.mask;
+			break;
+		case MAP_PORTD:
+			DDRD &= ~map.mask;
+			PORTD |= map.mask;
+			break;
+		}
+	}
+}
 
 /* ------------------------------------------------------------------------- */
 
@@ -77,8 +323,8 @@ usbMsgLen_t usbFunctionSetup(uchar data[8]) {
 	if ((rq->bmRequestType & USBRQ_TYPE_MASK) == USBRQ_TYPE_CLASS) { /* class request type */
 		if (rq->bRequest == USBRQ_HID_GET_REPORT) { /* wValue: ReportType (highbyte), ReportID (lowbyte) */
 			/* we only have one report type, so don't look at wValue */
-			usbMsgPtr = (usbMsgPtr_t) &reportBuffer;
-			return sizeof(reportBuffer);
+			usbMsgPtr = (usbMsgPtr_t) &jsRep;
+			return sizeof(jsRep);
 		} else if (rq->bRequest == USBRQ_HID_GET_IDLE) {
 			usbMsgPtr = (usbMsgPtr_t) &idleRate;
 			return 1;
@@ -94,81 +340,71 @@ usbMsgLen_t usbFunctionSetup(uchar data[8]) {
 /* ------------------------------------------------------------------------- */
 
 static void buildReport() {
-	/*
-	 * The pins are mapped as follows:
-	 *     Pin      --- --- PB5 PB4 PB3 PB2 PB1 PB0
-	 *     Function             B04 B03 B02 B01   R
-	 *
-	 *     Pin      --- --- PC5 PC4 PC3 PC2 PC1 PC0
-	 *     Function         B10 B09 B08 B07 B06 B05
-	 *
-	 *     Pin      PD7 PD6 PD5 --- PD3 --- PD1 PD0
-	 *     Function   L   U   D
-	 */
-
-	// Buttons
-	tmpReportBuffer[B_0] = (~PINC & 0b00001111) << 4;
-	tmpReportBuffer[B_0] |= (~PINB & 0b00011110) >> 1;
-	tmpReportBuffer[B_1] = (~PINC & 0b00110000) >> 4;
-
-	// X axis
-	if (~PINB & _BV(0)) {
-		// Right
-		tmpReportBuffer[X_AX] = 255;
-	} else if (~PIND & _BV(7)) {
-		// Left
-		tmpReportBuffer[X_AX] = 0;
-	} else {
-		// Center
-		tmpReportBuffer[X_AX] = 128;
+	if (InputPressed(MAP_AXIS_LEFT)) {
+		jsRep.X = 0;
+	}
+	else if (InputPressed(MAP_AXIS_RIGHT)) {
+		jsRep.X = 255;
+	}
+	else {
+		jsRep.X = 128;
 	}
 
-	// Y axis
-	if (~PIND & _BV(6)) {
-		// Up
-		tmpReportBuffer[Y_AX] = 255;
-	} else if (~PIND & _BV(5)) {
-		// Down
-		tmpReportBuffer[Y_AX] = 0;
-	} else {
-		//Center
-		tmpReportBuffer[Y_AX] = 128;
+	if (InputPressed(MAP_AXIS_DOWN)) {
+		jsRep.Y = 0;
 	}
+	else if (InputPressed(MAP_AXIS_UP)) {
+		jsRep.Y = 255;
+	}
+	else {
+		jsRep.Y = 128;
+	}
+
+	jsRep.ButtonL = 0x00;
+	jsRep.ButtonL |= InputPressed(0) << 0;
+	jsRep.ButtonL |= InputPressed(1) << 1;
+	jsRep.ButtonL |= InputPressed(2) << 2;
+	jsRep.ButtonL |= InputPressed(3) << 3;
+	jsRep.ButtonL |= InputPressed(4) << 4;
+	jsRep.ButtonL |= InputPressed(5) << 5;
+	jsRep.ButtonL |= InputPressed(6) << 6;
+	jsRep.ButtonL |= InputPressed(7) << 7;
+
+	jsRep.ButtonH = 0x00;
+	jsRep.ButtonH |= InputPressed(8) << 0;
+	jsRep.ButtonH |= InputPressed(9) << 1;
+
+	if (jsRep.ButtonL || jsRep.ButtonH) {
+		LED_on();
+	} else {
+		LED_off();
+	}
+
 }
 
 /* ------------------------------------------------------------------------- */
 
 static char updateReport() {
-	uchar i;
-	uchar changed = 0;
-
 	buildReport();
-	for (i = 0; i < REPORT_LEN; ++i) {
-		if (reportBuffer[i] != tmpReportBuffer[i]) {
-			changed = 1;
-		}
-		reportBuffer[i] = tmpReportBuffer[i];
+	if ((jsRep.ButtonL != tmpJsRep.ButtonL)
+			|| (jsRep.ButtonH != tmpJsRep.ButtonH)
+			|| (jsRep.X != tmpJsRep.X)
+			|| (jsRep.Y != tmpJsRep.Y)) {
+		tmpJsRep = jsRep;
+		return 1;
+	} else {
+		return 0;
 	}
-	return changed;
 }
 
 /* ------------------------------------------------------------------------- */
 
-static void portInit() {
-	// Reset status: port bits are inputs without pull-up.
-	// Enable pull-up on all pins, except D+/D- (PD2 and PD4).
-	PORTB = 0xFF;
-	PORTC = 0xFF;
-	PORTD = 0xFA;
-}
-
-/* ------------------------------------------------------------------------- */
-
-int __attribute__((noreturn)) main(void) {
+int __attribute__((OS_main)) main(void) {
 	uchar i;
 
+	InputInit();
+	MapInput();
 	wdt_enable(WDTO_1S);
-	portInit();
 	usbInit();
 	usbDeviceDisconnect(); /* enforce re-enumeration, do this while interrupts are disabled! */
 	i = 0;
@@ -183,7 +419,7 @@ int __attribute__((noreturn)) main(void) {
 		wdt_reset();
 		usbPoll();
 		if (usbInterruptIsReady() && updateReport()) {
-			usbSetInterrupt((void *) &reportBuffer, sizeof(reportBuffer));
+			usbSetInterrupt((void *) &jsRep, sizeof(jsRep));
 		}
 	}
 }
