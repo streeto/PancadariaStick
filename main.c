@@ -112,7 +112,6 @@ const InputMap_t inputMap[NUM_INPUT] = { { MAP_PORTB, _BV(1) }, { MAP_PORTB, _BV
 
 uint8_t buttonOrder[NUM_BUTTONS];
 uint8_t eeButtonOrder[NUM_BUTTONS] EEMEM = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-uint8_t newButtonOrder[NUM_BUTTONS];
 
 static USB_JoystickReport_Data_t jsRep;
 static USB_JoystickReport_Data_t tmpJsRep;
@@ -120,7 +119,7 @@ static USB_JoystickReport_Data_t tmpJsRep;
 
 /* ------------------------------------------------------------------------- */
 
-static inline uint8_t EEPROM_read(const void *eep_addr) {
+static inline uint8_t EEPROM_read(uint8_t *eep_addr) {
 	/* Wait for completion of previous write */
 	while (EECR & (1 << EEWE));
 	/* Set up address register */
@@ -133,10 +132,10 @@ static inline uint8_t EEPROM_read(const void *eep_addr) {
 
 /* ------------------------------------------------------------------------- */
 
-static void EEPROM_read_block(uint8_t sram_dest[], uint8_t eep_orig[], uint8_t count) {
+static void EEPROM_read_block(uint8_t *sram_dest, uint8_t *eep_orig, uint8_t count) {
 	uint8_t i;
 	for (i = 0; i < count; ++i) {
-		sram_dest[i] = EEPROM_read(&eep_orig[i]);
+		*(sram_dest + i) = EEPROM_read(eep_orig + i);
 	};
 }
 
@@ -156,10 +155,10 @@ static inline void EEPROM_write(uint8_t *eep_addr, uint8_t data) {
 
 /* ------------------------------------------------------------------------- */
 
-static void EEPROM_write_block(uint8_t sram_orig[], uint8_t eep_dest[], uint8_t count) {
+static void EEPROM_write_block(uint8_t *sram_orig, uint8_t *eep_dest, uint8_t count) {
 	uint8_t i;
 	for (i = 0; i < count; ++i) {
-		EEPROM_write(&eep_dest[i], sram_orig[i]);
+		EEPROM_write(eep_dest + i, *(sram_orig + i));
 	};
 }
 
@@ -225,6 +224,7 @@ static bool IsMapped(uint8_t button, uint8_t orderMap[])
 static void MapInput(void)
 {
 	uint8_t input, button, count;
+	uint8_t newButtonOrder[NUM_BUTTONS];
 
 	/* Default button mapping. */
 	for (input = 0; input < NUM_BUTTONS; ++input) {
@@ -232,7 +232,10 @@ static void MapInput(void)
 	}
 	if (!InputPressed(8) || !InputPressed(9)) {
 		/* No remapping, load previous map. */
-		EEPROM_read_block(buttonOrder, eeButtonOrder, NUM_BUTTONS);
+		EEPROM_read_block(&newButtonOrder[0], &eeButtonOrder[0], NUM_BUTTONS);
+		for (input = 0; input < NUM_BUTTONS; ++input) {
+			buttonOrder[input] = newButtonOrder[input];
+		}
 		return;
 	}
 
@@ -278,7 +281,7 @@ static void MapInput(void)
 	for (input = 0; input < NUM_BUTTONS; ++input) {
 		buttonOrder[input] = newButtonOrder[input];
 	}
-	EEPROM_write_block(buttonOrder, eeButtonOrder, NUM_BUTTONS);
+	EEPROM_write_block(newButtonOrder, eeButtonOrder, NUM_BUTTONS);
 }
 
 /* ------------------------------------------------------------------------- */
