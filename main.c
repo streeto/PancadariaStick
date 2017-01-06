@@ -389,17 +389,39 @@ static void buildReport() {
 
 /* ------------------------------------------------------------------------- */
 
-static char updateReport() {
-	buildReport();
-	if ((jsRep.ButtonL != tmpJsRep.ButtonL)
+static inline char reportChanged() {
+	return (jsRep.ButtonL != tmpJsRep.ButtonL)
 			|| (jsRep.ButtonH != tmpJsRep.ButtonH)
 			|| (jsRep.X != tmpJsRep.X)
-			|| (jsRep.Y != tmpJsRep.Y)) {
-		tmpJsRep = jsRep;
-		return 1;
-	} else {
-		return 0;
-	}
+			|| (jsRep.Y != tmpJsRep.Y);
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void saveLastReport() {
+	tmpJsRep = jsRep;
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline char timerExpired() {
+	//return true;
+	return TIFR & (1 << OCF1A);
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void resetTimer() {
+	TCNT1 = 0;
+	TIFR = (1 << OCF1A);
+}
+
+/* ------------------------------------------------------------------------- */
+
+static inline void setupTimer() {
+	TCCR1B |= (1 << WGM12); // Timer 1 in CTC mode
+	TCCR1B |= (1 << CS12); // Set up timer at Fcpu/256
+	OCR1A = 499; // Timer overflows in ~8 ms
 }
 
 /* ------------------------------------------------------------------------- */
@@ -419,12 +441,17 @@ int __attribute__((OS_main)) main(void) {
 	}
 	usbDeviceConnect();
 	sei();
+	setupTimer();
+	resetTimer();
 
 	for (;;) {
 		wdt_reset();
 		usbPoll();
-		if (usbInterruptIsReady() && updateReport()) {
+		buildReport();
+		if (timerExpired() && reportChanged() && usbInterruptIsReady()) {
 			usbSetInterrupt((void *) &jsRep, sizeof(jsRep));
+			saveLastReport();
+			resetTimer();
 		}
 	}
 }
