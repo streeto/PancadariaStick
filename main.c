@@ -221,6 +221,8 @@ static bool IsMapped(uint8_t button, uint8_t orderMap[])
 	return false;
 }
 
+/* ------------------------------------------------------------------------- */
+
 static void MapInput(void)
 {
 	uint8_t input, button, count;
@@ -350,7 +352,7 @@ static void buildReport() {
 		jsRep.X = 255;
 	}
 	else {
-		jsRep.X = 128;
+		jsRep.X = 127;
 	}
 
 	if (InputPressed(MAP_AXIS_DOWN)) {
@@ -360,7 +362,7 @@ static void buildReport() {
 		jsRep.Y = 255;
 	}
 	else {
-		jsRep.Y = 128;
+		jsRep.Y = 127;
 	}
 
 	jsRep.ButtonL = 0x00;
