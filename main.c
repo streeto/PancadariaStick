@@ -428,6 +428,7 @@ static inline void setupTimer() {
 
 int __attribute__((OS_main)) main(void) {
 	uchar i;
+	bool willReport = false;
 
 	InputInit();
 	MapInput();
@@ -448,10 +449,15 @@ int __attribute__((OS_main)) main(void) {
 		wdt_reset();
 		usbPoll();
 		buildReport();
-		if (timerExpired() && reportChanged() && usbInterruptIsReady()) {
+		if (!willReport) {
+			if (reportChanged()) {
+				resetTimer();
+				willReport = true;
+			}
+		} else if (timerExpired() && usbInterruptIsReady()) {
 			usbSetInterrupt((void *) &jsRep, sizeof(jsRep));
 			saveLastReport();
-			resetTimer();
+			willReport = false;
 		}
 	}
 }
